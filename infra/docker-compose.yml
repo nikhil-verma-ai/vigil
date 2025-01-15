@@ -1,0 +1,150 @@
+version: '3.8'
+
+# Full local stack for the autonomous fine-tuning platform.
+#
+# Service dependency order (startup):
+#   zookeeper → kafka → kafka-init (topic creation)
+#   redis (independent)
+#   prometheus (independent, scrapes all services)
+#   orchestrator (depends on kafka and redis being healthy)
+#
+# All services communicate on the default bridge network.
+# Kafka internal listener (29092) is used for inter-container comms;
+# the external listener (9092) is mapped to localhost for dev tooling.
+
+services:
+
+  # ── Zookeeper ──────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    hostname: zookeeper
+    container_name: afl_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Kafka broker ───────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka
+    container_name: afl_kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168       # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1 GiB
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Topic initialisation ───────────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: afl_kafka_init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./kafka/init-topics.sh:/init-topics.sh:ro
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      REPLICATION_FACTOR: "1"
+    command: ["bash", "/init-topics.sh"]
+    restart: on-failure
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    hostname: redis
+    container_name: afl_redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    hostname: prometheus
+    container_name: afl_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep 'Prometheus Server is Healthy'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Orchestrator ───────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: services/orchestrator/Dockerfile
+    container_name: afl_orchestrator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+      CLUSTER_ID: local
+      MOCK_DEPENDENCIES: "1"
+      MIN_CYCLE_INTERVAL_SECONDS: "43200"
+      DRIFT_SCORE_THRESHOLD: "4.5"
+      SCHEDULE_INTERVAL_SECONDS: "604800"
+      MAX_COST_USD: "30.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz | grep ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  redis-data:
+    driver: local
