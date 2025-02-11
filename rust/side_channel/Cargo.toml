@@ -1,0 +1,75 @@
+[package]
+name = "side_channel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Autonomous Fine-Tuning Platform"]
+description = "Zero-Copy Inference Side-Channel Agent — captures logprob signals and publishes to Kafka"
+
+[lib]
+name = "side_channel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "side_channel"
+path = "src/main.rs"
+
+[dependencies]
+# Kafka async client — cmake feature required for librdkafka static build
+rdkafka = { version = "0.37", features = ["cmake-build"] }
+
+# Prometheus metrics exposition
+prometheus = { version = "0.14", features = ["process"] }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Configuration (env + TOML)
+config = "0.14"
+
+# POSIX / memory-mapping utilities (mmap for future zero-copy buffer extension)
+libc = "0.2"
+memmap2 = "0.9"
+
+# Lock-free SPSC channel for the hot-path ring buffer
+crossbeam-channel = "0.5"
+
+# Error handling
+anyhow = "1"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Lightweight HTTP server for /metrics
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+
+# Async trait support
+async-trait = "0.1"
+
+# Tokio signal handling
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Random number generation for sampling
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+debug = true
